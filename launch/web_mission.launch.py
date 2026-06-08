@@ -111,7 +111,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "map",
             default_value=os.path.join(
-                os.path.expanduser("~"), "maps", "jetank_map.yaml"),
+                os.path.expanduser("~"), "maps", "sock_arena.yaml"),
             description="Full path to the nav2 map yaml file."),
         DeclareLaunchArgument(
             "model_path_sim", default_value="/home/koen/models/sock_sim.pt"),
