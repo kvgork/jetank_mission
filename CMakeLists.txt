@@ -53,6 +53,9 @@ if(BUILD_TESTING)
   set(ament_cmake_copyright_FOUND TRUE)
   set(ament_cmake_xmllint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_mission_fsm test/test_mission_fsm.py)
 endif()
 
 ament_package()
