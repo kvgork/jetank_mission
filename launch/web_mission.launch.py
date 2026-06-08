@@ -85,7 +85,10 @@ def generate_launch_description():
     # --- 2. nav2 (NavigateToPose + AMCL + map_server). use_sim_time:=true gates
     # off ALL hardware bringup + the 2nd robot_state_publisher (UnlessCondition);
     # mode:=nav2 brings up only nav2_bringup. rviz:=false: mobile_grasp owns RViz.
-    nav2 = TimerAction(period=20.0, actions=[
+    # +50s: mobile_grasp's own stagger now runs to ~46s (gazebo+controllers must
+    # settle before move_group/perception); nav2 starts after that to avoid a
+    # startup race that left controller_manager dead under simultaneous load.
+    nav2 = TimerAction(period=50.0, actions=[
         inc(navigation, "navigation_full.launch.py",
             mode="nav2", map=map_file, use_sim_time="true", rviz="false"),
     ])
@@ -104,7 +107,7 @@ def generate_launch_description():
     web = inc(web_control, "web_control.launch.py", sim="true")
 
     # Start the coordinator + web once nav2 has had time to come up.
-    mission_and_web = TimerAction(period=28.0, actions=[coordinator, web])
+    mission_and_web = TimerAction(period=60.0, actions=[coordinator, web])
 
     return LaunchDescription([
         DeclareLaunchArgument("world", default_value="sock_arena"),
