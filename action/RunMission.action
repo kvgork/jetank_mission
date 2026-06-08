@@ -1,0 +1,10 @@
+# Goal
+geometry_msgs/PoseStamped site    # where to look (map frame, from the web map click)
+float32 search_timeout            # seconds to search for a sock (0 = default)
+---
+# Result
+bool success
+string outcome                    # human-readable end state
+---
+# Feedback
+string state                      # current FSM state (NAVIGATE/SEARCH/PICK/DEPOSIT/...)
