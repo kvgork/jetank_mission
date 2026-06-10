@@ -148,6 +148,61 @@ def detection_passes(msg, min_score):
     return False
 
 
+def best_detection_center_x(msg, min_score):
+    """Horizontal pixel centre (``bbox.center.position.x``) of the highest-scoring
+    detection passing *min_score*, or ``None`` if none pass.
+
+    Used by SEARCH to centre the sock: the 2D detector fires while a sock is at
+    the extreme image edge (u≈0), but stereo disparity is invalid there, so
+    segmentation reprojects 0 points and PICK fails. SEARCH rotates the base to
+    bring this centre toward the image centre before declaring the sock found.
+    Tolerant of message shape; never raises.
+    """
+    if msg is None:
+        return None
+    detections = getattr(msg, "detections", None)
+    if not detections:
+        return None
+    best_score = None
+    best_cx = None
+    for det in detections:
+        results = getattr(det, "results", None)
+        if not results:
+            continue
+        score = None
+        for res in results:
+            hyp = getattr(res, "hypothesis", None)
+            s = getattr(hyp, "score", None) if hyp is not None else None
+            if s is None:
+                s = getattr(res, "score", None)
+            if s is None:
+                continue
+            try:
+                s = float(s)
+            except (TypeError, ValueError):
+                continue
+            if score is None or s > score:
+                score = s
+        if score is None or score < float(min_score):
+            continue
+        bbox = getattr(det, "bbox", None)
+        center = getattr(bbox, "center", None) if bbox is not None else None
+        pos = getattr(center, "position", None) if center is not None else None
+        cx = getattr(pos, "x", None) if pos is not None else None
+        if cx is None:  # legacy Pose2D had .x directly on center
+            cx = getattr(center, "x", None) if center is not None else None
+        if cx is None:
+            continue
+        try:
+            cx = float(cx)
+        except (TypeError, ValueError):
+            continue
+        if best_score is None or score > best_score:
+            best_score = score
+            best_cx = cx
+    return best_cx
+
+
 def resolve_search_timeout(goal_timeout, default_timeout):
     """Per-goal search timeout: the goal value if > 0, else the param default."""
     try:
@@ -188,6 +243,13 @@ class MissionCoordinator(Node):
         self.declare_parameter("min_score", 0.3)
         self.declare_parameter("search_timeout", 20.0)
         self.declare_parameter("search_omega", 0.5)
+        # Centering: SEARCH rotates the base to bring the sock's bbox centre
+        # within `center_tol_frac` of the image centre before declaring it found,
+        # so the sock sits in the stereo-valid region (the 2D detector fires at
+        # the image edge where disparity is invalid -> segmentation gets 0 points).
+        self.declare_parameter("image_width", 640)
+        self.declare_parameter("center_tol_frac", 0.12)
+        self.declare_parameter("center_omega", 0.35)
         self.declare_parameter("cmd_vel_topic", "/diff_drive_controller/cmd_vel")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("nav_action", "/navigate_to_pose")
@@ -376,29 +438,60 @@ class MissionCoordinator(Node):
         return True, "reached goal."
 
     def _search(self, goal_handle, goal_search_timeout):
-        """Rotate in place watching /detections/socks; (ok, message).
+        """Rotate to find AND centre a sock; return (ok, message).
 
-        Stops the base (zero Twist) before returning on every path.
+        Two regimes, both watching ``/detections/socks``:
+          * no sock detected   -> scan-rotate one direction (``search_omega``);
+          * sock detected       -> rotate the base toward it (``center_omega``,
+            direction from the bbox-centre offset) until the bbox centre lies
+            within ``center_tol_frac`` of the image centre, THEN succeed.
+
+        Centring matters because the 2D detector fires while the sock is at the
+        extreme image edge (u≈0), where stereo disparity is invalid -> the 3D
+        segmentation reprojects 0 points and PICK fails. Stops the base (zero
+        Twist) before returning on every path.
         """
         min_score = float(self.get_parameter("min_score").value)
-        omega = float(self.get_parameter("search_omega").value)
+        scan_omega = float(self.get_parameter("search_omega").value)
+        center_omega = float(self.get_parameter("center_omega").value)
+        width = float(self.get_parameter("image_width").value)
+        center_x = width / 2.0
+        tol_px = float(self.get_parameter("center_tol_frac").value) * width
         default_timeout = float(self.get_parameter("search_timeout").value)
         timeout_s = resolve_search_timeout(goal_search_timeout, default_timeout)
 
-        # Clear any stale detection so we only react to fresh ones during SEARCH.
-        self._latest_detection = None
+        # Do NOT clear _latest_detection here. The subscription updates it
+        # continuously (~14 Hz), so it is always <0.1 s old. Clearing it forced
+        # the first loop iterations to blind-scan in a FIXED direction before the
+        # callback re-fired — which rotated AWAY from a sock that was already in
+        # view (esp. one off to one side). Keeping it lets SEARCH centre toward an
+        # already-visible sock from iteration 1 instead of turning away from it.
 
         deadline = self.get_clock().now().nanoseconds + int(timeout_s * 1e9)
         try:
             while rclpy.ok():
                 if goal_handle.is_cancel_requested:
                     return False, "cancelled."
-                if detection_passes(self._latest_detection, min_score):
-                    self.get_logger().info("SEARCH: sock detected; stopping.")
-                    return True, "sock in view."
                 if self.get_clock().now().nanoseconds > deadline:
                     return False, f"no sock found within {timeout_s:.1f}s."
-                self._publish_twist(omega)
+
+                cx = best_detection_center_x(self._latest_detection, min_score)
+                if cx is None:
+                    # No sock yet — scan one direction.
+                    self._publish_twist(scan_omega)
+                    time.sleep(0.05)
+                    continue
+
+                err_px = cx - center_x  # >0: sock right of centre, <0: left
+                if abs(err_px) <= tol_px:
+                    self.get_logger().info(
+                        f"SEARCH: sock centred (bbox x={cx:.0f}, "
+                        f"err={err_px:+.0f}px, tol={tol_px:.0f}px); stopping."
+                    )
+                    return True, "sock centred in view."
+                # Image +x is to the right; turn right (negative yaw) when the
+                # sock is right of centre, left (positive yaw) when it is left of.
+                self._publish_twist(-center_omega if err_px > 0.0 else center_omega)
                 time.sleep(0.05)
         finally:
             self._publish_twist(0.0)
