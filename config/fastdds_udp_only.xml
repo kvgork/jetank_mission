@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Fast-DDS profile: force UDPv4-only transport, disable shared memory (SHM).
+
+  Why: on this dev box the Fast-DDS SHM transport intermittently wedges with
+    RTPS_TRANSPORT_SHM Error] Failed init_port fastrtps_portNNNNN:
+      open_and_lock_file failed
+  when many nodes start (e.g. the full sock-fetch mission stack: gazebo +
+  controllers + move_group + perception + nav2 + web). Late-starting nodes
+  (nav2's amcl/controller_server/...) fail to allocate an SHM port, so their
+  lifecycle change_state handshakes time out and they never activate -> AMCL
+  never publishes map->odom -> Nav2 rejects every goal. /dev/shm is NOT full;
+  it is a stale flock left by a dead process. Disabling SHM and using UDPv4
+  loopback sidesteps the whole failure class with negligible localhost overhead.
+
+  Use: export FASTRTPS_DEFAULT_PROFILES_FILE=<this file> before ros2 launch.
+  (Wire into scripts/pixi-activate.sh to make it the workspace default.)
+-->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <profiles>
+        <transport_descriptors>
+            <transport_descriptor>
+                <transport_id>udp_only_transport</transport_id>
+                <type>UDPv4</type>
+            </transport_descriptor>
+        </transport_descriptors>
+        <participant profile_name="udp_only_participant" is_default_profile="true">
+            <rtps>
+                <userTransports>
+                    <transport_id>udp_only_transport</transport_id>
+                </userTransports>
+                <useBuiltinTransports>false</useBuiltinTransports>
+            </rtps>
+        </participant>
+    </profiles>
+</dds>

@@ -47,6 +47,7 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
+    SetEnvironmentVariable,
     TimerAction,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -60,12 +61,25 @@ def generate_launch_description():
     map_file = LaunchConfiguration("map")
     model_path_sim = LaunchConfiguration("model_path_sim")
     use_rviz = LaunchConfiguration("use_rviz")
+    gui = LaunchConfiguration("gui")
 
     ros_main = FindPackageShare("jetank_ros_main")
     navigation = FindPackageShare("jetank_navigation")
     web_control = FindPackageShare("jetank_web_control")
+    mission = FindPackageShare("jetank_mission")
 
     sim_time = {"use_sim_time": True}
+
+    # Force Fast-DDS to UDPv4-only (disable SHM). On this dev box the SHM
+    # transport intermittently wedges (open_and_lock_file failed) when the full
+    # stack starts, so the late-launching nav2 nodes fail to allocate SHM ports
+    # and never activate -> AMCL never localizes -> Nav2 rejects every goal.
+    # Setting this first propagates to every node in this stack (incl. included
+    # sub-launches). See config/fastdds_udp_only.xml.
+    udp_only_profile = SetEnvironmentVariable(
+        "FASTRTPS_DEFAULT_PROFILES_FILE",
+        PathJoinSubstitution([mission, "config", "fastdds_udp_only.xml"]),
+    )
 
     def inc(pkg, rel, **launch_args):
         return IncludeLaunchDescription(
@@ -79,7 +93,7 @@ def generate_launch_description():
     # mobile_grasp internally staggers gz -> move_group -> perception -> pipeline.
     mobile_grasp = inc(
         ros_main, "mobile_grasp.launch.py",
-        world=world, model_path_sim=model_path_sim, use_rviz=use_rviz,
+        world=world, model_path_sim=model_path_sim, use_rviz=use_rviz, gui=gui,
     )
 
     # --- 2. nav2 (NavigateToPose + AMCL + map_server). use_sim_time:=true gates
@@ -110,6 +124,7 @@ def generate_launch_description():
     mission_and_web = TimerAction(period=60.0, actions=[coordinator, web])
 
     return LaunchDescription([
+        udp_only_profile,
         DeclareLaunchArgument("world", default_value="sock_arena"),
         DeclareLaunchArgument(
             "map",
@@ -118,7 +133,12 @@ def generate_launch_description():
             description="Full path to the nav2 map yaml file."),
         DeclareLaunchArgument(
             "model_path_sim", default_value="/home/koen/models/sock_sim.pt"),
-        DeclareLaunchArgument("use_rviz", default_value="true"),
+        # Headless defaults: this stack is driven from the browser (:8080), so the
+        # Gazebo GUI + MoveIt RViz are off by default to cut load and let the
+        # controller_manager come up cleanly. Pass gui:=true use_rviz:=true to see them.
+        DeclareLaunchArgument("use_rviz", default_value="false"),
+        DeclareLaunchArgument("gui", default_value="false",
+                              description="Gazebo GUI client (false => server-only)."),
         mobile_grasp,
         nav2,
         mission_and_web,
